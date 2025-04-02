@@ -1,0 +1,17 @@
+preprocessing:
+  mel_spectrogram:
+    n_fft: 1024
+    hop_length: 256
+    win_length: 1024
+    n_mels: 128
+    sample_rate: 22050
+  pitch_spectrogram:
+    tau: 0.005
+    band: 10
+    hop_length: 256
+    sample_rate: 22050
+  energy:
+    n_fft: 1024
+    win_length: 1024
+    hop_length: 256
+    sample_rate: 22050

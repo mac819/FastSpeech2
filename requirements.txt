@@ -9,4 +9,18 @@ pip
 python-dotenv
 ruff
 scikit-learn
+torch
+torchaudio
+torchvision
+kaggle
+librosa
+pyworld
+tgt
+unidecode == 1.1.1
+inflect == 4.1.0
+g2p-en == 2.1.0
+PyWavelets
+nemo_toolkit[all]
+nemo_text_processing
+# numpy == 2.0.1
 -e .
