@@ -146,6 +146,7 @@ def calc_pitch_spectrogram(filepath, config: dict):
     f0_filled = f0_interp(t)
 
     # Step 3: Normalize pitch contour (log scale)
+    f0_filled[f0_filled <= 0] = 1e-6 # Giving small value to the negative interpolated values
     f0_log = np.log(f0_filled)
     f0_mean, f0_std = np.mean(f0_log), np.std(f0_log)
     f0_norm = (f0_log - f0_mean) / f0_std

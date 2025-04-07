@@ -12,6 +12,6 @@ preprocessing:
     sample_rate: 22050
   energy:
     n_fft: 1024
-    win_length: 1024
     hop_length: 256
+    win_length: 1024
     sample_rate: 22050
