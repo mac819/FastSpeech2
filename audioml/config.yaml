@@ -15,3 +15,10 @@ preprocessing:
     hop_length: 256
     win_length: 1024
     sample_rate: 22050
+text:
+  vocab_size: 114
+encoder:
+  text_embedding: 256
+decoder:
+  n_fft_layers: 6
+  

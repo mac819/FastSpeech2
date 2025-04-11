@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
+from audioml.processing.text_speech_alignment import TTSTokenizer
 
 
 PACKAGE_PATH = Path(__file__).parent.parent
@@ -24,8 +25,12 @@ class SpeechFeatureDataset(Dataset):
         self.duration_dir = Path(feature_dir) / 'duration'
         self.mel_dir = Path(feature_dir) / 'mel_spec'
         self.pitch_dir = Path(feature_dir) / 'pitch'
+        self.transcript_dir = Path(DATA_PATH) / 'interim'
+
+        self.tokenizer = TTSTokenizer()
 
         self.files = self.__files_list()
+        print(f"files: {self.files}")
         # print(self.files)
         # Get all the available file paths
         self.feature_path = []
@@ -37,6 +42,7 @@ class SpeechFeatureDataset(Dataset):
             pitch_contour_mean_path = self.__get_pitch_contour_mean_path(file=file)
             pitch_contour_std_path = self.__get_pitch_contour_std_path(file=file)
             pitch_spec_path = self.__get_pitch_spec_path(file=file)
+            text_path = self.__get_transcript_path(file=file)
             # print([mel_spec_path, energy_path, 
             #        duration_path, pitch_contour_path,
             #        pitch_contour_mean_path, pitch_contour_std_path,
@@ -44,9 +50,10 @@ class SpeechFeatureDataset(Dataset):
             if all([mel_spec_path, energy_path, 
                    duration_path, pitch_contour_path,
                    pitch_contour_mean_path, pitch_contour_std_path,
-                   pitch_spec_path]):
+                   pitch_spec_path, text_path]):
                 self.feature_path.append((
                     file,
+                    text_path,
                     mel_spec_path,
                     energy_path,
                     duration_path,
@@ -55,7 +62,14 @@ class SpeechFeatureDataset(Dataset):
                     pitch_contour_std_path,
                     pitch_spec_path
                 ))
+        print(f"feature_paths: {self.feature_path}")
 
+    def __get_transcript_path(self, file):
+        path = self.transcript_dir / f"in_corpus/{file}.txt"
+        # print(f"transcript path: {path}")
+        if path.exists():
+            return path
+        return False
 
     def __get_mel_path(self, file):
         path = self.mel_dir / f"mel_{file}.npy"
@@ -136,20 +150,37 @@ class SpeechFeatureDataset(Dataset):
         pitch_contour_std_files = [str(x.name) for x in self.pitch_dir.glob("pitch_contour_std_*.npy")]
         pitch_contour_std_files = [x.split(".")[0].replace("pitch_contour_std_", "") for x in pitch_contour_std_files]
 
-        files_for_all_feauters = set(mel_files).union(
+        # Text Files
+        text_files = [str(x.name) for x in self.transcript_dir.glob("in_corpus/*.txt")]
+        text_files = [x.split(".")[0] for x in text_files]
+        print(f"text_files: {text_files}")
+        files_for_all_feauters = set(mel_files).intersection(
             set(energy_files)).intersection(
                 set(duration_files)).intersection(
                     set(pitch_spec_files).intersection(
                         set(pitch_contour_files).intersection(
                             set(pitch_contour_mean_files).intersection(
-                                set(pitch_contour_std_files
-        )))))
+                                set(pitch_contour_std_files).intersection(
+                                    set(text_files)
+                                )
+        ))))
         return list(files_for_all_feauters)
 
+    def __load_text(self, path):
+        with open(path, 'r') as f:
+            text = f.readlines()
+        return text
+    
+
+    def __tokeinze_text(self, raw_text):
+        return torch.tensor(self.tokenizer.tokenize(raw_text), dtype=torch.int32)
     
     def __getitem__(self, idx):
         feature_fname = self.feature_path[idx][0]
-        features = self.feature_path[idx][1:]
+        text = self.__load_text(self.feature_path[idx][1])[0]
+        text_token_ids = self.__tokeinze_text(text)
+        # text_token_ids = [self.__tokeinze_text(x) for x in self.feature_path[idx][2]]
+        features = self.feature_path[idx][2:]
         # Feature sequence
         #   1. filename
         #   2. mel-spectrogram
@@ -164,6 +195,8 @@ class SpeechFeatureDataset(Dataset):
 
         return {
             'filename': feature_fname,
+            'raw_text': text,
+            'token_ids': text_token_ids,
             'mel_spectrogram': torch.transpose(feature_tensors[0][0], 0, 1), # (time_frame, mel-bins)
             'energy': feature_tensors[1],
             'duration': feature_tensors[2],
@@ -181,9 +214,25 @@ def collate_function(batch):
     """
     
     """
+    text = [item['raw_text'] for item in batch]
+
+    token_length = [item['token_ids'].shape[0] for item in batch]
+    max_token_length = max(token_length)
+    padded_token_ids = [
+        F.pad(
+            item['token_ids'],
+            (0, max_token_length - item['token_ids'].shape[0]),
+            "constant",
+            0
+        ) for item in batch
+    ]
+    padded_token_ids = torch.stack(padded_token_ids, dim=0)
+
+
     # Get max length for each features
     # Mel-Spectrogram, shpae: (time_frame, mel-bins)
-    mel_max_length = max([item['mel_spectrogram'].shape[0] for item in batch])
+    mel_length = [item['mel_spectrogram'].shape[0] for item in batch]
+    mel_max_length = max(mel_length)
     padded_mel_spectrogram = [
         F.pad(
             item['mel_spectrogram'], 
@@ -195,7 +244,8 @@ def collate_function(batch):
     padded_mel_spectrogram = torch.stack(padded_mel_spectrogram, dim=0)
 
     # Energy, shape: (time_frame, )
-    energy_max_length = max([item['energy'].shape[0] for item in batch])
+    energy_length = [item['energy'].shape[0] for item in batch]
+    energy_max_length = max(energy_length)
     padded_energy = [
         F.pad(
             item['energy'],
@@ -207,7 +257,8 @@ def collate_function(batch):
     padded_energy = torch.stack(padded_energy, dim=0)
 
     # Duration, shape: (token_count, )
-    duration_max_length = max([item['duration'].shape[0] for item in batch])
+    duration_length = [item['duration'].shape[0] for item in batch]
+    duration_max_length = max(duration_length)
     padded_duration = [
         F.pad(
             item['duration'],
@@ -219,7 +270,8 @@ def collate_function(batch):
     padded_duration = torch.stack(padded_duration, dim=0)
 
     # Pitch Spectrogram, shape: (time_frame, pitch-bins)
-    pitch_spectrogram_max_length = max([item['pitch_spectrogram'].shape[0] for item in batch])
+    pitch_spectrogram_length = [item['pitch_spectrogram'].shape[0] for item in batch]
+    pitch_spectrogram_max_length = max(pitch_spectrogram_length)
     padded_pitch_spectrogram = [
         F.pad(
             item['pitch_spectrogram'],
@@ -231,7 +283,8 @@ def collate_function(batch):
     padded_pitch_spectrogram = torch.stack(padded_pitch_spectrogram, dim=0)
 
     # Pitch Contour, shape: (time_frame, )
-    pitch_contour_max_length = max([item['pitch_contour'].shape[0] for item in batch])
+    pitch_contour_length = [item['pitch_contour'].shape[0] for item in batch]
+    pitch_contour_max_length = max(pitch_contour_length)
     padded_pitch_contour = [
         F.pad(
             item['pitch_contour'],
@@ -252,13 +305,27 @@ def collate_function(batch):
 
     return {
         'filename': filenames,
+        'raw_text': text,
+        'token_ids': padded_token_ids,
+        'token_length': token_length,
+        'token_max_length': max_token_length,
         'mel_spectrogram': padded_mel_spectrogram,
+        'mel_length': mel_length,
+        'mel_max_length': mel_max_length,
         'energy': padded_energy,
+        'energy_length': energy_length,
+        'energy_max_length': energy_max_length,
         'duration': padded_duration,
+        'duration_length': duration_length,
+        'duration_max_length': duration_max_length,
         'pitch_contour': padded_pitch_contour,
+        'pitch_contour_length': pitch_contour_length,
+        'pitch_contour_max_length': pitch_contour_max_length,
         'pitch_contour_mean': [item['pitch_contour_mean'] for item in batch],
         'pitch_contour_std': [item['pitch_contour_std'] for item in batch],
-        'pitch_spectrogram': padded_pitch_spectrogram
+        'pitch_spectrogram': padded_pitch_spectrogram,
+        'pitch_spectrogram_length': pitch_spectrogram_length,
+        'pitch_spectrogram_max_length': pitch_spectrogram_max_length
     }
 
 
