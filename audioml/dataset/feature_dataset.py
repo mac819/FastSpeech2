@@ -220,16 +220,16 @@ class SpeechFeatureDataset(Dataset):
         # Sorted Index
         token_length = [item['token_ids'].shape[0] for item in batch]
         sorted_idx = np.argsort(token_length)[::-1]  # Sort in descending order
-        sorted_batch = [batch[i] for i in sorted_idx]
-        print(f"Token Length: {token_length}")
-        print(f"Sorted IDX: {sorted_idx}")
+        # sorted_batch = [batch[i] for i in sorted_idx]
+        # print(f"Token Length: {token_length}")
+        # print(f"Sorted IDX: {sorted_idx}")
 
         tail_idx = sorted_idx[len(sorted_idx) - (len(sorted_idx) % self.batch_size):]
         idx_arr = sorted_idx[:len(sorted_idx) - (len(sorted_idx) % self.batch_size)]
         if not self.drop_last and len(tail_idx) > 0:
             idx_arr += [tail_idx]
         idx_arr = np.reshape(idx_arr, (-1, self.batch_size)).tolist()
-        print(f"idx_arr: {idx_arr}")
+        # print(f"idx_arr: {idx_arr}")
 
         text = [item['raw_text'] for item in batch]
         token_ids = [item['token_ids'] for item in batch]

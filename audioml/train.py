@@ -13,6 +13,8 @@ from audioml.processing.text_speech_alignment import TTSTokenizer
 
 
 MODEL_DIR = Path(__file__).parent.parent / "models"
+DATA_DIR = Path(__file__).parent.parent / "data"
+CURR_DIR = Path(__file__).parent
 
 class ScheduledOptim:
     """ A simple wrapper class for learning rate scheduling """
@@ -23,10 +25,10 @@ class ScheduledOptim:
         self._optimizer = torch.optim.Adam(
             model.parameters(),
             betas=train_config["optimizer"]["betas"],
-            eps=train_config["optimizer"]["eps"],
+            eps=float(train_config["optimizer"]["eps"]),
             weight_decay=train_config["optimizer"]["weight_decay"],
         )
-        self.n_warmup_steps = train_config["optimizer"]["warm_up_step"]
+        self.n_warmup_steps = train_config["optimizer"]["warm_up_steps"]
         self.anneal_steps = train_config["optimizer"]["anneal_steps"]
         self.anneal_rate = train_config["optimizer"]["anneal_rate"]
         self.current_step = current_step
@@ -100,33 +102,38 @@ def train(
     # Inititalize Tokenizer
     tokenizer = TTSTokenizer()
 
-
-    # TODO: code for restoring the model from a checkpoint
     if train_config['restore_step'] > 0:
         print(f"Restoring model from step {train_config['restore_step']}...")
         # Load the model state here if needed
-        # model.load_state_dict(torch.load(train_config['model_path']))
-        pass
+        artifact_path = MODEL_DIR / f"model_step_{train_config['restore_step']}.pth"
+        if artifact_path.exists():
+            checkpoint = torch.load(artifact_path)
+        else:
+            raise FileNotFoundError(f"Checkpoint {artifact_path} not found.")
+        model = Text2Mel(cfg=config)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.train()
+        print(f"Model restored from {artifact_path}")
+        # Restore the optimizer state
+        scheduled_optim = ScheduledOptim(
+            model=model,
+            config=config,
+            current_step=checkpoint['step']
+        )
+        scheduled_optim.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"Optimizer restored from step {checkpoint['step']}")
     else:
         print("Starting training from scratch...")
         # Initialize the model
         model = Text2Mel(cfg=config)
         model.train()
 
-    # TODO: code for restoring the optimizer state from a checkpoint
-    if train_config['restore_step'] > 0:
-        print(f"Restoring optimizer from step {train_config['restore_step']}...")
-        # Load the optimizer state here if needed
-        # scheduled_optim.load_state_dict(torch.load(train_config['optimizer_path']))
-        pass
-    else:
         print("Initializing optimizer...")
         # Initialize the optimizer
         # Load Optimizers
         scheduled_optim = ScheduledOptim(
             model=model,
-            train_config=train_config,
-            model_config=config['model'],
+            config=config,
             current_step=0
         )
 
@@ -144,11 +151,11 @@ def train(
             for batch in batchs:
 
                 tokens = tokenizer.batch_tokenize(batch['raw_text'])
-                input_ids, src_mask, duration = tokens['input_ids'], tokens['src_mask'], batch['duration']
+                input_ids, src_mask, duration = tokens['input_ids'], tokens['mask_ids'], batch['duration']
                 model_outputs = model(
                     input_ids, 
                     src_mask, 
-                    alpha=config['variance_apadtor']['alpha'], 
+                    alpha=config['variance_adaptor']['alpha'], 
                     train=True, 
                     gt_duration=duration
                 )
@@ -162,8 +169,8 @@ def train(
                 # Pitch Feature Prediction
                 pred_pitch_spec = pitch_predictions['pitch_spectrogram']
                 # pred_f0 = pitch_predictions['reconstructed_f0']
-                pred_pitch_mean = pitch_predictions['pitch_contour_mean']
-                pred_pitch_std = pitch_predictions['pitch_contour_std']
+                pred_pitch_mean = pitch_predictions['pitch_mean']
+                pred_pitch_std = pitch_predictions['pitch_std']
                 # Energy Prediction
                 pred_energy = energy_predictions['raw_energy']
 
@@ -172,10 +179,10 @@ def train(
                 # Mel-Spectrogram Target
                 mel_spec_target = batch['mel_spectrogram']
                 # Pitch Target
-                pitch_spec_target = batch['pitch_spectrogram']
+                pitch_spec_target = torch.tensor(batch['pitch_spectrogram'])
                 # pitch_contour_target = batch['pitch_contour']
-                pitch_mean_target = batch['pitch_contour_mean']
-                pitch_std_target = batch['pitch_contour_std']
+                pitch_mean_target = torch.tensor(batch['pitch_contour_mean'])
+                pitch_std_target = torch.tensor(batch['pitch_contour_std'])
                 # Energy Target
                 energy_target = batch['energy']
 
@@ -233,6 +240,15 @@ def train(
                     logger.add_scalar('Loss/PitchMean', pitch_mean_loss.item(), step)
                     logger.add_scalar('Loss/PitchSTD', pitch_std_loss.item(), step)
                     logger.add_scalar('Loss/Energy', energy_loss.item(), step)
+                    print(f""
+                          f"Step: {step}, "
+                          f"Total Loss: {total_loss.item():.4f}, "
+                          f"Mel Loss: {mel_loss.item():.4f}, "
+                          f"Duration Loss: {duration_loss.item():.4f}, "
+                          f"Pitch Spectrogram Loss: {pitch_spectrogram_loss.item():.4f}, "
+                          f"Pitch Mean Loss: {pitch_mean_loss.item():.4f}, "
+                          f"Pitch STD Loss: {pitch_std_loss.item():.4f}, "
+                          f"Energy Loss: {energy_loss.item():.4f}")
                 # Increment step
                 step += 1
                 # Update progress bar
@@ -242,9 +258,11 @@ def train(
 
 
 if __name__=="__main__":
+    feature_dir = str(DATA_DIR / 'processed' / 'lj_speech_feature')
+    config_path = str(CURR_DIR / 'config.yaml')
     train(
-        config_path="config/fastspeech2.yaml",
-        feature_dir="data/processed_features",
+        config_path=config_path,
+        feature_dir=feature_dir,
         group_size=1
     )
-#     print("Training completed successfully.")
+    print("Training completed successfully.")
