@@ -5,6 +5,7 @@ import torchaudio
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
+import torch.nn.functional as F
 import torchaudio.transforms as T
 from nemo.collections.tts.models import AlignerModel
 from nemo_text_processing.text_normalization.normalize import Normalizer
@@ -30,6 +31,31 @@ class TTSTokenizer:
         norm_text = self.text_normalizer.normalize(raw_text)
         text_tokens = self.aligner.tokenizer(norm_text)
         return text_tokens
+    
+    def batch_tokenize(self, raw_text: list):
+        token_batch = [torch.tensor(self.tokenize(x)) for x in raw_text]
+
+        token_lengths = torch.tensor([len(x) for x in token_batch])
+        max_len = torch.max(token_lengths)
+        # print(f"max_len: {max_len}")
+        mask_tensor = torch.arange(max_len).unsqueeze(0).expand(len(token_batch), -1)
+        mask_tensor = (mask_tensor >= token_lengths.unsqueeze(1)).int()
+
+        # Pad token batch
+        padded_token_batch = [
+            F.pad(
+                x,
+                (0, max_len - len(x)),
+                'constant',
+                0
+            ) for x in token_batch
+        ]
+        padded_token_batch = torch.stack(padded_token_batch, dim=0)
+
+        return {
+            'input_ids': padded_token_batch,
+            'mask_ids': mask_tensor
+        }
 
 
 class SpeechAlignment:

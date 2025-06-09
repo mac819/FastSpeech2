@@ -18,7 +18,58 @@ preprocessing:
 text:
   vocab_size: 114
 encoder:
-  text_embedding: 256
+  n_fft_layers: 2
+  embedding_layer:
+    dims: 384
+    context_length: 512
+  text:
+    vocab_size: 114
+  fft:
+    d_in: 384
+    d_out: 384
+    n_head: 2
+    drop_rate: 0.1
+    qkv_bias: False
+    kernel_size: 3
+    stride: 1
+    padding: null
+    dilation: 1
+variance_adaptor:
+  alpha: 1.0
+  input_size: 384
+  filter_size: 384
+  num_layers: 2
+  kernel_size: 3
+  stride: 1
+  drop_rate: 0.1
+  cwt_scales: 10
 decoder:
-  n_fft_layers: 6
-  
+  n_fft_layers: 2
+  n_mels: 128
+  fft:
+    d_in: 384
+    d_out: 384
+    n_head: 2
+    drop_rate: 0.1
+    qkv_bias: False
+    kernel_size: 3
+    stride: 1
+    padding: null
+    dilation: 1
+train:
+  batch_size: 32
+  steps: 100000
+  restore_step: 0
+  optimizer:
+    betas: [0.9, 0.98]
+    eps: 1e-9
+    learning_rate: 0.0001
+    anneal_steps: 10000
+    anneal_rate: 0.1
+    warm_up_steps: 1000
+    weight_decay: 0.01
+  gradient_accumulation_steps: 1
+  gradient_clip_threshold: 1.0
+  log_step: 100
+  save_step: 1000
+  shuffle: True

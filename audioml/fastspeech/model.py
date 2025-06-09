@@ -1,164 +1,199 @@
 import torch
 import torch.nn as nn
 
+from audioml.fastspeech.utils import Embedding
+from audioml.fastspeech.transformer import FFTBlock
+from audioml.fastspeech.speech_feature_predictor import (
+    DurationPredictor,
+    LengthRegulator,
+    PitchPredictor,
+    EnergyPredictor
+)
 
-class MultiHeadAttention(nn.Module):
-
-    def __init__(self, d_in, d_out, n_head, dropout=0.5, qkv_bias=False):
-        super().__init__()
-        self.d_in = d_in
-        self.d_out = d_out
-        self.n_head = n_head
-        self.head_dim = self.d_out // self.n_head
-
-        assert self.head_dim * self.n_head == self.d_out, "Head dimension is not matching with model dimension"
-
-        # Key, Query and Value projection
-        self.w_k = nn.Linear(self.d_in, self.d_out, bias=qkv_bias)
-        self.w_q = nn.Linear(self.d_in, self.d_out, bias=qkv_bias)
-        self.w_v = nn.Linear(self.d_in, self.d_out, bias=qkv_bias)
-
-        self.dropout = nn.Dropout(dropout)
-        self.w_o = nn.Linear(self.d_out, self.d_out, bias=True)
-
-    def forward(self, x, mask=None):
-        batch, seq_len, emb_dim = x.shape[0], x.shape[1], x.shape[2]
-        print(f"batch: {batch} | seq_len: {seq_len} | emb_dim: {emb_dim}")
-        key = self.w_k(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2) # (batch, seq_len, d_in) --> (batch, n_head, seq_len, head_dim)
-        query = self.w_q(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2) # (batch, seq_len, d_in) --> (batch, n_head, seq_len, head_dim)
-        value = self.w_v(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2) # (batch, seq_len, d_in) --> (batch, n_head, seq_len, head_dim)
-        print(f"Shape | key: {key.shape}, query: {query.shape}, value: {value.shape}")
-        attn_scores = query @ key.transpose(2, 3) # --> (batch, n_head, seq_len, head_dim) * (batch, n_head, head_dim, seq_len) = (batch, n_head, seq_len, seq_len)
-        # attn_scores = torch.bmm(query, key.transpose(2, 3)) 
-
-        if mask:
-            # Mask Calculation
-            # Column Masking mask --> (batch x seq_len)
-            seq_len = mask.shape[-1]
-            assert seq_len == attn_scores.shape[-1], "Mask sequence length is NOT equal to attention scores"
-            col_token_mask = mask.unsqueeze(1).expand(-1, seq_len, -1) # --> (batch x seq_len x seq_len)
-            row_token_mask = mask.unsqueeze(2).expand(-1, -1, seq_len) # --> (batch x seq_len x seq_len)
-            mask = col_token_mask | row_token_mask # --> (batch x seq_len x seq_len)
-            mask = mask.unsqueeze(1).expand(-1, self.n_head, -1, -1) # --> (batch x n_head x seq_len x seq_len)
-            attn_scores = attn_scores.masked_fill(mask, -float('inf'))# --> (batch x n_head x seq_len x seq_len)
-
-        attn_weights = torch.softmax(
-            attn_scores / key.shape[-1]**0.5, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        context_vec = attn_weights @ value # --> (batch x n_head x seq_len x head_dim)
-        # context_vec = torch.bmm(attn_weights, value).transpose(1, 2) 
-        context_vec = context_vec.transpose(1, 2).contiguous().view(
-            batch, seq_len, self.d_out
-        )
-
-        context_vec = self.w_o(context_vec)
-        return context_vec
-    
-
-class Embedding(nn.Module):
-
-    def __init__(self, emb_dim, vocab_size, token_context_length):
-        super().__init__()
-        self.emb_dim = emb_dim
-        self.vocab_size = vocab_size
-        self.context_length = token_context_length
-
-        self.tok_emb = nn.Embedding(self.vocab_size, self.emb_dim)
-        self.pos_emb = nn.Embedding(self.context_length, self.emb_dim)
-
-    def forward(self, x):
-        batch, seq_len = x.shape
-        emb = self.tok_emb(x)
-
-        pos_embeds = self.pos_emb(
-            torch.arange(seq_len) # Add this tensor to device with argument device
-        )
-        embedding = emb + pos_embeds
-        return embedding
-
-
-class Conv1D(nn.Module):
-
-    def __init__(self, emb_dim, kernel_size=3, stride=1, padding=None, dilation=1):
-        super().__init__()
-        if padding is None:
-            assert kernel_size % 2 == 1
-            padding = int(dilation * (kernel_size - 1) / 2)
-        
-        self.layers = nn.Sequential(
-            nn.Conv1d(in_channels=emb_dim, out_channels=4*emb_dim, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=4*emb_dim, out_channels=emb_dim, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation)
-        )
-    
-    def forward(self, x):
-        return self.layers(x).transpose(1, 2)
-
-
-class LayerNorm(nn.Module):
-
-    def __init__(self, emb_dim):
-        super().__init__()
-        self.eps = 1e-5
-        self.scale = nn.Parameter(torch.ones(emb_dim))
-        self.shift = nn.Parameter(torch.zeros(emb_dim))
-
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.shift
-    
-
-class FFTBlock(nn.Module):
+class Encoder(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
 
-        # MHA Layer params
-        self.d_in = cfg['d_in']
-        self.d_out = cfg['d_out']
-        self.n_head = cfg['n_head']
-        self.dropout = cfg['drop_rate']
-        self.qkv_bias = cfg['qkv_bias']
-
-        self.mha = MultiHeadAttention(
-            d_in=self.d_in,
-            d_out=self.d_out,
-            n_head=self.n_head,
-            dropout=self.dropout,
-            qkv_bias=self.qkv_bias
-        )
-        self.layer_norm1 = LayerNorm(
-            emb_dim=self.d_out
+        self.n_fft_layers = cfg['n_fft_layers']
+        self.fft_cfg = cfg['fft']
+        self.embedding_config = cfg['embedding_layer']
+        self.text_config = cfg['text']
+        # Embedding Layer
+        self.embedding_layer = Embedding(
+            emb_dim=self.embedding_config['dims'],
+            vocab_size=self.text_config['vocab_size'],
+            token_context_length=self.embedding_config['context_length']
         )
 
-        self.conv1d = Conv1D(
-            emb_dim=self.d_out,
-            kernel_size=cfg['kernel_size'],
-            stride=cfg['stride'],
-            padding=cfg['padding'],
-            dilation=cfg['dilation']
+        # FFT Block
+        self.fft_layers = nn.ModuleList(
+            [
+                FFTBlock(cfg=self.fft_cfg) for _ in range(self.n_fft_layers)
+            ]
         )
-        self.layer_norm2 = LayerNorm(
-            emb_dim=self.d_out
+
+    def forward(self, input_ids, mask):
+        fft_output = self.embedding_layer(input_ids)
+        for fft in self.fft_layers:
+            fft_output = fft(fft_output, mask)
+
+        return fft_output
+    
+
+class VarianceAdaptor(nn.Module):
+
+    def __init__(self, 
+                 input_size, 
+                 filter_size=384, 
+                 num_layers=2, 
+                 kernel_size=3, 
+                 stride=1, 
+                 dropout_rate=0.1, 
+                 cwt_scales=10):
+        super().__init__()
+        
+        # Duration Predictor
+        self.duration_predictor = DurationPredictor(
+            input_size=input_size,
+            filter_size=filter_size,
+            num_layers=num_layers,
+            kernel_size=kernel_size,
+            stride=stride
         )
-        self.dropout = nn.Dropout(self.dropout)
+
+        # Length Regulator
+        self.lr = LengthRegulator()
+        
+        # Pitch Predictor
+        self.pitch_predictor = PitchPredictor(
+            input_size=input_size,
+            filter_size=filter_size,
+            kernel_size=kernel_size,
+            dropout_rate=dropout_rate,
+            num_layers=num_layers,
+            cwt_scales=cwt_scales
+        )
+
+        # Energy Predictor
+        self.energy_predictor = EnergyPredictor(
+            input_size=input_size,
+            filter_size=filter_size,
+            kernel_size=kernel_size,
+            dropout_rate=dropout_rate,
+            num_layers=num_layers,
+            stride=stride
+        )
+
+
+    def forward(self, x, src_mask, alpha=1.0, train=False, gt_duration=None):
+
+        # Different input duration according to training or inference
+        # Duration Prediction
+        log_duration = self.duration_predictor(x, src_mask)
+
+        # Processing on log_duration
+        duration = torch.exp(log_duration) * alpha
+        
+        # Round to nearest integer and convert to int
+        duration = torch.round(duration).squeeze(-1).long()
+    
+        # Ensure minimum duration of 1
+        duration = torch.clamp_min(duration, 1)
+        duration = duration.masked_fill(src_mask.bool(), 0)
+
+        if train:
+            if gt_duration == None:
+                raise ValueError("Ground Truth of duration must pass in training mode.")
+            
+            # Length Regulator
+            mel_hidden_state, mel_mask = self.lr(x, gt_duration)
+        else:
+            # Length Regulator
+            mel_hidden_state, mel_mask = self.lr(x, duration)
+    
+        # Adding pitch prediction
+        residual = mel_hidden_state
+        pitch_output = self.pitch_predictor(mel_hidden_state, mel_mask)
+        mel_hidden_state = pitch_output['pitch_embedding']
+        mel_hidden_state = mel_hidden_state + residual
+
+        # Adding Energy prediction
+        residual = mel_hidden_state
+        energy_output = self.energy_predictor(mel_hidden_state, mel_mask)
+        mel_hidden_state = energy_output['energy_embedding']
+        mel_hidden_state = mel_hidden_state + residual
+
+        return mel_hidden_state, mel_mask, log_duration, duration, pitch_output, energy_output
+    
+
+# Input: (batch x seq_length x emb_dimension)
+class MelDecoder(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.n_fft_layers = cfg['n_fft_layers']
+        self.fft_cfg = cfg['fft']
+        self.d_out = self.fft_cfg['d_out']
+        self.n_mels = cfg['n_mels']
+
+        # FFT Block
+        self.fft_layers = nn.ModuleList(
+            [
+                FFTBlock(cfg=self.fft_cfg) for _ in range(self.n_fft_layers)
+            ]
+        )
+
+        self.mel_proj = nn.Linear(self.d_out, self.n_mels)
         
 
-    def forward(self, x): # --> (batch x seq_len x d_in)
-        
-        residual = x
-        x = self.layer_norm1(x)
-        x = self.mha(x)
-        x = self.dropout(x)
-        x = x + residual
+    def forward(self, x, mask): # --> (batch x seq_len x d_in)
+    
+        for fft in self.fft_layers:
+            x = fft(x, mask)
 
-        residual = x
-        x = self.layer_norm2(x)
-        x = self.conv1d(x.transpose(1, 2))
-        x = self.dropout(x)
-        x = x + residual
-        
-        return x
+        mel_spec = self.mel_proj(x)
+        mel_spec = mel_spec.masked_fill(mask.unsqueeze(-1).bool(), 0)
+        return mel_spec
+    
+
+class Text2Mel(nn.Module):
+
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.encoder = Encoder(cfg=cfg['encoder'])
+        self.variance_adaptor = VarianceAdaptor(
+            input_size=cfg['variance_adaptor']['input_size'],
+            filter_size=cfg['variance_adaptor']['filter_size'],
+            num_layers=cfg['variance_adaptor']['num_layers'],
+            kernel_size=cfg['variance_adaptor']['kernel_size'],
+            stride=cfg['variance_adaptor']['stride'],
+            dropout_rate=cfg['variance_adaptor']['drop_rate'],
+            cwt_scales=cfg['variance_adaptor']['cwt_scales']
+        )
+        self.decoder = MelDecoder(cfg=cfg['decoder'])
+    def forward(self, input_ids, src_mask, alpha=1.0, train=False, gt_duration=None):
+        # Encoder
+        encoder_output = self.encoder(input_ids, src_mask)
+
+        # Variance Adaptor
+        mel_hidden_state, mel_mask, log_duration, duration, pitch_output, energy_output = self.variance_adaptor(
+            x=encoder_output,
+            src_mask=src_mask,
+            alpha=alpha,
+            train=train,
+            gt_duration=gt_duration
+        )
+
+        # Decoder
+        mel_spec = self.decoder(mel_hidden_state, mel_mask)
+
+        return {
+            'mel_spec': mel_spec,
+            'mel_mask': mel_mask,
+            'log_duration': log_duration,
+            'duration': duration,
+            'pitch': pitch_output,
+            'energy': energy_output
+        }

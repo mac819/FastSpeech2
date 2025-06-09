@@ -19,8 +19,11 @@ FEATURE_DIR = DATA_PATH / 'processed' / 'lj_speech_feature'
 
 class SpeechFeatureDataset(Dataset):
 
-    def __init__(self, feature_dir):
+    def __init__(self, feature_dir, batch_size, sort=True, drop_last=False):
         super().__init__()
+        self.batch_size = batch_size
+        self.sort = sort
+        self.drop_last = drop_last
         self.energy_dir = Path(feature_dir) / 'energy'
         self.duration_dir = Path(feature_dir) / 'duration'
         self.mel_dir = Path(feature_dir) / 'mel_spec'
@@ -30,7 +33,7 @@ class SpeechFeatureDataset(Dataset):
         self.tokenizer = TTSTokenizer()
 
         self.files = self.__files_list()
-        print(f"files: {self.files}")
+        # print(f"files: {self.files}")
         # print(self.files)
         # Get all the available file paths
         self.feature_path = []
@@ -62,7 +65,7 @@ class SpeechFeatureDataset(Dataset):
                     pitch_contour_std_path,
                     pitch_spec_path
                 ))
-        print(f"feature_paths: {self.feature_path}")
+        # print(f"feature_paths: {self.feature_path}")
 
     def __get_transcript_path(self, file):
         path = self.transcript_dir / f"in_corpus/{file}.txt"
@@ -153,7 +156,7 @@ class SpeechFeatureDataset(Dataset):
         # Text Files
         text_files = [str(x.name) for x in self.transcript_dir.glob("in_corpus/*.txt")]
         text_files = [x.split(".")[0] for x in text_files]
-        print(f"text_files: {text_files}")
+        # print(f"text_files: {text_files}")
         files_for_all_feauters = set(mel_files).intersection(
             set(energy_files)).intersection(
                 set(duration_files)).intersection(
@@ -210,123 +213,153 @@ class SpeechFeatureDataset(Dataset):
         return len(self.feature_path)
     
 
-def collate_function(batch):
-    """
-    
-    """
-    text = [item['raw_text'] for item in batch]
+    def collate_function(self, batch):
+        """
+        
+        """
+        # Sorted Index
+        token_length = [item['token_ids'].shape[0] for item in batch]
+        sorted_idx = np.argsort(token_length)[::-1]  # Sort in descending order
+        sorted_batch = [batch[i] for i in sorted_idx]
+        print(f"Token Length: {token_length}")
+        print(f"Sorted IDX: {sorted_idx}")
 
-    token_length = [item['token_ids'].shape[0] for item in batch]
-    max_token_length = max(token_length)
-    padded_token_ids = [
-        F.pad(
-            item['token_ids'],
-            (0, max_token_length - item['token_ids'].shape[0]),
-            "constant",
-            0
-        ) for item in batch
-    ]
-    padded_token_ids = torch.stack(padded_token_ids, dim=0)
+        tail_idx = sorted_idx[len(sorted_idx) - (len(sorted_idx) % self.batch_size):]
+        idx_arr = sorted_idx[:len(sorted_idx) - (len(sorted_idx) % self.batch_size)]
+        if not self.drop_last and len(tail_idx) > 0:
+            idx_arr += [tail_idx]
+        idx_arr = np.reshape(idx_arr, (-1, self.batch_size)).tolist()
+        print(f"idx_arr: {idx_arr}")
+
+        text = [item['raw_text'] for item in batch]
+        token_ids = [item['token_ids'] for item in batch]
+        mel_spectrogram = [item['mel_spectrogram'] for item in batch]
+        energy = [item['energy'] for item in batch]
+        duration = [item['duration'] for item in batch]
+        pitch_contour = [item['pitch_contour'] for item in batch]
+        pitch_contour_mean = [item['pitch_contour_mean'] for item in batch]
+        pitch_contour_std = [item['pitch_contour_std'] for item in batch]
+        pitch_spectrogram = [item['pitch_spectrogram'] for item in batch]
+
+        output = list()
+        for idx in idx_arr:
+            group_text = [text[i] for i in idx]
+            
+            group_token_ids = [token_ids[i] for i in idx]
+            group_token_length = [item.shape[0] for item in group_token_ids]
+            group_max_token_length = max(group_token_length)
+            group_padded_token_ids = [
+                F.pad(
+                    item,
+                    (0, group_max_token_length - item.shape[0]),
+                    "constant",
+                    0
+                ) for item in group_token_ids
+            ]
+            group_padded_token_ids = torch.stack(group_padded_token_ids, dim=0)
 
 
-    # Get max length for each features
-    # Mel-Spectrogram, shpae: (time_frame, mel-bins)
-    mel_length = [item['mel_spectrogram'].shape[0] for item in batch]
-    mel_max_length = max(mel_length)
-    padded_mel_spectrogram = [
-        F.pad(
-            item['mel_spectrogram'], 
-            (0, 0, 0, mel_max_length - item['mel_spectrogram'].shape[0]), 
-            "constant", 
-            0
-        ) for item in batch
-    ]
-    padded_mel_spectrogram = torch.stack(padded_mel_spectrogram, dim=0)
+            # Get max length for each features
+            # Mel-Spectrogram, shpae: (time_frame, mel-bins)
+            group_mel_spec = [mel_spectrogram[i] for i in idx]
+            group_mel_length = [item.shape[0] for item in group_mel_spec]
+            group_max_mel_length = max(group_mel_length)
+            group_padded_mel_spectrogram = [
+                F.pad(
+                    item, 
+                    (0, 0, 0, group_max_mel_length - item.shape[0]), 
+                    "constant", 
+                    0
+                ) for item in group_mel_spec
+            ]
+            group_padded_mel_spectrogram = torch.stack(group_padded_mel_spectrogram, dim=0)
 
-    # Energy, shape: (time_frame, )
-    energy_length = [item['energy'].shape[0] for item in batch]
-    energy_max_length = max(energy_length)
-    padded_energy = [
-        F.pad(
-            item['energy'],
-            (0, energy_max_length - item['energy'].shape[0]),
-            "constant",
-            0
-        ) for item in batch
-    ]
-    padded_energy = torch.stack(padded_energy, dim=0)
 
-    # Duration, shape: (token_count, )
-    duration_length = [item['duration'].shape[0] for item in batch]
-    duration_max_length = max(duration_length)
-    padded_duration = [
-        F.pad(
-            item['duration'],
-            (0, duration_max_length - item['duration'].shape[0]),
-            "constant",
-            0
-        ) for item in batch
-    ]
-    padded_duration = torch.stack(padded_duration, dim=0)
+            # Energy, shape: (time_frame, )
+            group_energy = [energy[i] for i in idx]
+            group_energy_length = [item.shape[0] for item in group_energy]
+            group_energy_max_length = max(group_energy_length)
+            group_padded_energy = [
+                F.pad(
+                    item,
+                    (0, group_energy_max_length - item.shape[0]),
+                    "constant",
+                    0
+                ) for item in group_energy
+            ]
+            group_padded_energy = torch.stack(group_padded_energy, dim=0)
+            
 
-    # Pitch Spectrogram, shape: (time_frame, pitch-bins)
-    pitch_spectrogram_length = [item['pitch_spectrogram'].shape[0] for item in batch]
-    pitch_spectrogram_max_length = max(pitch_spectrogram_length)
-    padded_pitch_spectrogram = [
-        F.pad(
-            item['pitch_spectrogram'],
-            (0, 0, 0, pitch_spectrogram_max_length - item['pitch_spectrogram'].shape[0]),
-            "constant",
-            0
-        ) for item in batch
-    ]
-    padded_pitch_spectrogram = torch.stack(padded_pitch_spectrogram, dim=0)
+            # Duration, shape: (token_count, )
+            group_duration = [duration[i] for i in idx]
+            group_duration_length = [item.shape[0] for item in group_duration]
+            group_duration_max_length = max(group_duration_length)
+            group_padded_duration = [
+                F.pad(
+                    item,
+                    (0, group_duration_max_length - item.shape[0]),
+                    "constant",
+                    0
+                ) for item in group_duration
+            ]
+            group_padded_duration = torch.stack(group_padded_duration, dim=0)
 
-    # Pitch Contour, shape: (time_frame, )
-    pitch_contour_length = [item['pitch_contour'].shape[0] for item in batch]
-    pitch_contour_max_length = max(pitch_contour_length)
-    padded_pitch_contour = [
-        F.pad(
-            item['pitch_contour'],
-            (0, pitch_contour_max_length - item['pitch_contour'].shape[0]),
-            "constant",
-            0
-        ) for item in batch
-    ]
-    padded_pitch_contour = torch.stack(padded_pitch_contour, dim=0)
+            # Pitch Spectrogram, shape: (time_frame, pitch-bins)
+            group_pitch_spectrogram = [pitch_spectrogram[i] for i in idx]
+            group_pitch_spectrogram_length = [item.shape[0] for item in group_pitch_spectrogram]
+            group_pitch_spectrogram_max_length = max(group_pitch_spectrogram_length)
+            group_padded_pitch_spectrogram = [
+                F.pad(
+                    item,
+                    (0, 0, 0, group_pitch_spectrogram_max_length - item.shape[0]),
+                    "constant",
+                    0
+                ) for item in group_pitch_spectrogram
+            ]
+            group_padded_pitch_spectrogram = torch.stack(group_padded_pitch_spectrogram, dim=0)
 
-    filenames = [item['filename'] for item in batch]
-    print("Max sizes of features in batch:")
-    print(f"Mel Spectrogram max length: {mel_max_length}")
-    print(f"Energy max length: {energy_max_length}")
-    print(f"Duration max length: {duration_max_length}")
-    print(f"Pitch Spectrogram max length: {pitch_spectrogram_max_length}")
-    print(f"Pitch contour max length: {pitch_contour_max_length}")
+            # Pitch Contour, shape: (time_frame, )
+            group_pitch_contour = [pitch_contour[i] for i in idx]
+            group_pitch_contour_length = [item.shape[0] for item in group_pitch_contour]
+            group_pitch_contour_max_length = max(group_pitch_contour_length)
+            group_padded_pitch_contour = [
+                F.pad(
+                    item,
+                    (0, group_pitch_contour_max_length - item.shape[0]),
+                    "constant",
+                    0
+                ) for item in group_pitch_contour
+            ]
+            group_padded_pitch_contour = torch.stack(group_padded_pitch_contour, dim=0)
+            
+            group_pitch_contour_mean = [pitch_contour_mean[i] for i in idx]
+            group_pitch_contour_std = [pitch_contour_std[i] for i in idx]
+            output.append({
+                'filename': [batch[i]['filename'] for i in idx],
+                'raw_text': group_text,
+                'token_ids': group_padded_token_ids,
+                'token_length': group_token_length,
+                'token_max_length': group_max_token_length,
+                'mel_spectrogram': group_padded_mel_spectrogram,
+                'mel_length': group_mel_length,
+                'mel_max_length': group_max_mel_length,
+                'energy': group_padded_energy,
+                'energy_length': group_energy_length,
+                'energy_max_length': group_energy_max_length,
+                'duration': group_padded_duration,
+                'duration_length': group_duration_length,
+                'duration_max_length': group_duration_max_length,
+                'pitch_contour': group_padded_pitch_contour,
+                'pitch_contour_length': group_pitch_contour_length,
+                'pitch_contour_max_length': group_pitch_contour_max_length,
+                'pitch_contour_mean': group_pitch_contour_mean,
+                'pitch_contour_std': group_pitch_contour_std,
+                'pitch_spectrogram': group_padded_pitch_spectrogram,
+                'pitch_spectrogram_length': group_pitch_spectrogram_length,
+                'pitch_spectrogram_max_length': group_pitch_spectrogram_max_length
+            })
 
-    return {
-        'filename': filenames,
-        'raw_text': text,
-        'token_ids': padded_token_ids,
-        'token_length': token_length,
-        'token_max_length': max_token_length,
-        'mel_spectrogram': padded_mel_spectrogram,
-        'mel_length': mel_length,
-        'mel_max_length': mel_max_length,
-        'energy': padded_energy,
-        'energy_length': energy_length,
-        'energy_max_length': energy_max_length,
-        'duration': padded_duration,
-        'duration_length': duration_length,
-        'duration_max_length': duration_max_length,
-        'pitch_contour': padded_pitch_contour,
-        'pitch_contour_length': pitch_contour_length,
-        'pitch_contour_max_length': pitch_contour_max_length,
-        'pitch_contour_mean': [item['pitch_contour_mean'] for item in batch],
-        'pitch_contour_std': [item['pitch_contour_std'] for item in batch],
-        'pitch_spectrogram': padded_pitch_spectrogram,
-        'pitch_spectrogram_length': pitch_spectrogram_length,
-        'pitch_spectrogram_max_length': pitch_spectrogram_max_length
-    }
+        return output
 
 
 if __name__=="__main__":
