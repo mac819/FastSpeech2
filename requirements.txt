@@ -1,11 +1,7 @@
-ipython
-jupyterlab
 matplotlib
 mkdocs
-notebook
 numpy
 pandas
-pip
 python-dotenv
 ruff
 scikit-learn
@@ -20,7 +16,7 @@ unidecode == 1.1.1
 inflect == 4.1.0
 g2p-en == 2.1.0
 PyWavelets
-nemo_toolkit[all]
-nemo_text_processing
+#nemo_toolkit[all]
+#nemo_text_processing
 # numpy == 2.0.1
 -e .

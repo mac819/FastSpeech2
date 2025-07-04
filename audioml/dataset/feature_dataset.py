@@ -226,9 +226,10 @@ class SpeechFeatureDataset(Dataset):
 
         tail_idx = sorted_idx[len(sorted_idx) - (len(sorted_idx) % self.batch_size):]
         idx_arr = sorted_idx[:len(sorted_idx) - (len(sorted_idx) % self.batch_size)]
+        idx_arr = np.reshape(idx_arr, (-1, self.batch_size)).tolist()
         if not self.drop_last and len(tail_idx) > 0:
             idx_arr += [tail_idx]
-        idx_arr = np.reshape(idx_arr, (-1, self.batch_size)).tolist()
+        
         # print(f"idx_arr: {idx_arr}")
 
         text = [item['raw_text'] for item in batch]
@@ -332,8 +333,8 @@ class SpeechFeatureDataset(Dataset):
             ]
             group_padded_pitch_contour = torch.stack(group_padded_pitch_contour, dim=0)
             
-            group_pitch_contour_mean = [pitch_contour_mean[i] for i in idx]
-            group_pitch_contour_std = [pitch_contour_std[i] for i in idx]
+            group_pitch_contour_mean = torch.tensor([pitch_contour_mean[i] for i in idx])
+            group_pitch_contour_std = torch.tensor([pitch_contour_std[i] for i in idx])
             output.append({
                 'filename': [batch[i]['filename'] for i in idx],
                 'raw_text': group_text,
@@ -363,8 +364,10 @@ class SpeechFeatureDataset(Dataset):
 
 
 if __name__=="__main__":
+    batch_size = 16
     feature_dataset = SpeechFeatureDataset(
-        feature_dir=FEATURE_DIR
+        feature_dir=FEATURE_DIR,
+        batch_size=batch_size
     )
 
     # print(feature_dataset[0])
@@ -389,15 +392,15 @@ if __name__=="__main__":
     print(f"pitch spectrogram shape: {pitch_spectrogram.shape}")
 
 
-    batch_size = 8
+  
     shuffle=True
     feature_dataloader = DataLoader(
         feature_dataset,
-        batch_size=batch_size,
+        batch_size=batch_size*4,
         shuffle=shuffle,
-        collate_fn=collate_function
+        collate_fn=feature_dataset.collate_function
     )
 
-    for batch in feature_dataloader:
-        print(batch)
-        break        
+    # for batch in feature_dataloader:
+    #     print(batch)
+    #     break        

@@ -86,6 +86,7 @@ class FFTBlock(nn.Module):
         self.conv1d = Conv1D(
             emb_dim=self.d_out,
             kernel_size=cfg['kernel_size'],
+            filter_size=cfg['filter_size'],
             stride=cfg['stride'],
             padding=cfg['padding'],
             dilation=cfg['dilation']

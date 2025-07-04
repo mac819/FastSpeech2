@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-from audioml.fastspeech.utils import Embedding
 from audioml.fastspeech.transformer import FFTBlock
 from audioml.fastspeech.speech_feature_predictor import (
     DurationPredictor,
@@ -9,6 +8,7 @@ from audioml.fastspeech.speech_feature_predictor import (
     PitchPredictor,
     EnergyPredictor
 )
+from audioml.fastspeech.utils import Embedding, get_sinusoid_encoding_table
 
 class Encoder(nn.Module):
 
@@ -44,7 +44,9 @@ class Encoder(nn.Module):
 class VarianceAdaptor(nn.Module):
 
     def __init__(self, 
-                 input_size, 
+                 text_input_size,
+                 mel_input_size, 
+                 text_emb_dim=256,
                  filter_size=384, 
                  num_layers=2, 
                  kernel_size=3, 
@@ -55,7 +57,7 @@ class VarianceAdaptor(nn.Module):
         
         # Duration Predictor
         self.duration_predictor = DurationPredictor(
-            input_size=input_size,
+            input_size=text_input_size,
             filter_size=filter_size,
             num_layers=num_layers,
             kernel_size=kernel_size,
@@ -64,10 +66,16 @@ class VarianceAdaptor(nn.Module):
 
         # Length Regulator
         self.lr = LengthRegulator()
+
+        # Encoder-Decoder projection
+        self.dec_proj = nn.Linear(
+          text_emb_dim,
+          mel_input_size
+        )
         
         # Pitch Predictor
         self.pitch_predictor = PitchPredictor(
-            input_size=input_size,
+            input_size=mel_input_size,
             filter_size=filter_size,
             kernel_size=kernel_size,
             dropout_rate=dropout_rate,
@@ -77,7 +85,7 @@ class VarianceAdaptor(nn.Module):
 
         # Energy Predictor
         self.energy_predictor = EnergyPredictor(
-            input_size=input_size,
+            input_size=mel_input_size,
             filter_size=filter_size,
             kernel_size=kernel_size,
             dropout_rate=dropout_rate,
@@ -111,6 +119,7 @@ class VarianceAdaptor(nn.Module):
         else:
             # Length Regulator
             mel_hidden_state, mel_mask = self.lr(x, duration)
+        mel_hidden_state = self.dec_proj(mel_hidden_state)
     
         # Adding pitch prediction
         residual = mel_hidden_state
@@ -136,6 +145,12 @@ class MelDecoder(nn.Module):
         self.fft_cfg = cfg['fft']
         self.d_out = self.fft_cfg['d_out']
         self.n_mels = cfg['n_mels']
+        self.context_length = cfg['context_length']
+
+        self.pos_emb = nn.Parameter(
+          get_sinusoid_encoding_table(self.context_length+1, self.d_out).unsqueeze(0),
+          requires_grad=False
+        )
 
         # FFT Block
         self.fft_layers = nn.ModuleList(
@@ -148,7 +163,10 @@ class MelDecoder(nn.Module):
         
 
     def forward(self, x, mask): # --> (batch x seq_len x d_in)
-    
+        batch, seq_len, emb_dim = x.shape
+        # Positional Embedding
+        pos_emb = self.pos_emb[:, :seq_len]
+        x = x + pos_emb
         for fft in self.fft_layers:
             x = fft(x, mask)
 
@@ -164,7 +182,9 @@ class Text2Mel(nn.Module):
 
         self.encoder = Encoder(cfg=cfg['encoder'])
         self.variance_adaptor = VarianceAdaptor(
-            input_size=cfg['variance_adaptor']['input_size'],
+            text_input_size=cfg['variance_adaptor']['text_input_size'],
+            mel_input_size=cfg['variance_adaptor']['mel_input_size'],
+            text_emb_dim=cfg['encoder']['embedding_layer']['dims'],
             filter_size=cfg['variance_adaptor']['filter_size'],
             num_layers=cfg['variance_adaptor']['num_layers'],
             kernel_size=cfg['variance_adaptor']['kernel_size'],

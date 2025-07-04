@@ -4,6 +4,8 @@ import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -42,8 +44,16 @@ class ScheduledOptim:
         # print(self.init_lr)
         self._optimizer.zero_grad()
 
-    def load_state_dict(self, path):
-        self._optimizer.load_state_dict(path)
+    def state_dict(self):
+        return {
+          "optimizer_state_dict": self._optimizer.state_dict(),
+          "current_step": self.current_step
+        }
+
+    def load_state_dict(self, state_dict):
+        self._optimizer.load_state_dict(state_dict=state_dict['optimizer_state_dict'])
+        # Overwrite the step from the constructor with the one from the checkpoint
+        self.current_step = state_dict['current_step']
 
     def _get_lr_scale(self):
         lr = np.min(
@@ -76,6 +86,8 @@ def load_config(path):
 def train(
         config_path, feature_dir, group_size
 ):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device {device}")
     config = load_config(config_path)
     train_config = config['train']
     gradient_accumulation_steps = train_config['gradient_accumulation_steps']
@@ -107,10 +119,10 @@ def train(
         # Load the model state here if needed
         artifact_path = MODEL_DIR / f"model_step_{train_config['restore_step']}.pth"
         if artifact_path.exists():
-            checkpoint = torch.load(artifact_path)
+            checkpoint = torch.load(artifact_path, weights_only=False)
         else:
             raise FileNotFoundError(f"Checkpoint {artifact_path} not found.")
-        model = Text2Mel(cfg=config)
+        model = Text2Mel(cfg=config).to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         model.train()
         print(f"Model restored from {artifact_path}")
@@ -125,7 +137,7 @@ def train(
     else:
         print("Starting training from scratch...")
         # Initialize the model
-        model = Text2Mel(cfg=config)
+        model = Text2Mel(cfg=config).to(device)
         model.train()
 
         print("Initializing optimizer...")
@@ -151,7 +163,7 @@ def train(
             for batch in batchs:
 
                 tokens = tokenizer.batch_tokenize(batch['raw_text'])
-                input_ids, src_mask, duration = tokens['input_ids'], tokens['mask_ids'], batch['duration']
+                input_ids, src_mask, duration = tokens['input_ids'].to(device), tokens['mask_ids'].to(device), batch['duration'].to(device)
                 model_outputs = model(
                     input_ids, 
                     src_mask, 
@@ -159,6 +171,19 @@ def train(
                     train=True, 
                     gt_duration=duration
                 )
+
+                # Label/Targets
+                log_duration_target = torch.log(torch.clamp(duration, min=1.0)).masked_fill(src_mask.bool(), 0)
+                # Mel-Spectrogram Target
+                mel_spec_target = batch['mel_spectrogram'].to(device)
+                # Pitch Target
+                pitch_spec_target = batch['pitch_spectrogram'].to(device)
+                # pitch_contour_target = batch['pitch_contour']
+                pitch_mean_target = batch['pitch_contour_mean'].to(device)
+                pitch_std_target = batch['pitch_contour_std'].to(device)
+                # Energy Target
+                energy_target = batch['energy'].to(device)
+
 
                 # Predictions
                 pred_mel_spec = model_outputs['mel_spec']
@@ -174,17 +199,6 @@ def train(
                 # Energy Prediction
                 pred_energy = energy_predictions['raw_energy']
 
-                # Label/Targets
-                log_duration_target = torch.log(torch.clamp(batch['duration'], min=1.0)).masked_fill(src_mask.bool(), 0)
-                # Mel-Spectrogram Target
-                mel_spec_target = batch['mel_spectrogram']
-                # Pitch Target
-                pitch_spec_target = torch.tensor(batch['pitch_spectrogram'])
-                # pitch_contour_target = batch['pitch_contour']
-                pitch_mean_target = torch.tensor(batch['pitch_contour_mean'])
-                pitch_std_target = torch.tensor(batch['pitch_contour_std'])
-                # Energy Target
-                energy_target = batch['energy']
 
                 # log_duration_target.requires_grad = False
                 # mel_spec_target.requires_grad = False
@@ -220,12 +234,14 @@ def train(
                     scheduled_optim.step_and_update_lr()
                     scheduled_optim.zero_grad()
 
+                step = scheduled_optim.current_step
+
                 if step % train_config['save_step'] == 0:
                     # Save the model state
                     model_save_path = MODEL_DIR / f"model_step_{step}.pth"
                     torch.save({
                         'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': scheduled_optim._optimizer.state_dict(),
+                        'optimizer_state_dict': scheduled_optim.state_dict(),
                         'step': step,
                         'config': config
                     }, model_save_path)
@@ -249,8 +265,34 @@ def train(
                           f"Pitch Mean Loss: {pitch_mean_loss.item():.4f}, "
                           f"Pitch STD Loss: {pitch_std_loss.item():.4f}, "
                           f"Energy Loss: {energy_loss.item():.4f}")
-                # Increment step
-                step += 1
+
+                    # Log Images <<---- Adding Mel-Spectrogram to tensorboard
+                    # For Visualization, we'll just pick the first item from the batch
+                    # The Shape of pred_mel_spec is (B, H, W), so we take the first element.
+                    predicted_spec = pred_mel_spec[0] # Shape: (Mel_Bins, Time)
+                    target_spec = mel_spec_target[0] # Shape: (Mel_Bins, Time)
+
+                    colormap = cm.get_cmap('virdis')
+                    # Add a channel dimension to make it (1, H, W)
+                    predicted_spec = predicted_spec.unsqueeze(0)
+                    target_spec = target_spec.unsqueeze(0)
+
+                    predicted_spec = colormap(predicted_spec.detach().cpu().numpy())[..., :3]
+                    target_spec = colormap(target_spec.detach().cpu().numpy())[..., :3]
+
+                    logger.add_image(
+                      "Mel-SPectrogram/Predicted",
+                      predicted_spec,
+                      global_step=step,
+                      dataformats="NHWC"
+                    )
+                    logger.add_image(
+                      "Mel-SPectrogram/Target",
+                      target_spec,
+                      global_step=step,
+                      dataformats="NHWC"
+                    )
+                
                 # Update progress bar
                 outer_loop.update(1)
             inner_loop.update(1)

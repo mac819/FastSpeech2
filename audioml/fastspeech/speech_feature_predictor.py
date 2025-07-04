@@ -46,7 +46,7 @@ class DurationPredictor(nn.Module):
         
         x = x.transpose(1, 2) # --> (batch x filter_size x sequence_length) = (batch x sequence_length x filter_size)
 
-        log_duration = self.linear_proj(x).squeeze() # --> (batch x seq_length x filter_size) = (batch x seq_length)
+        log_duration = self.linear_proj(x).squeeze(-1) # --> (batch x seq_length x filter_size) = (batch x seq_length)
         
         return log_duration
     
@@ -55,6 +55,7 @@ class LengthRegulator(nn.Module):
 
     def __init__(self):
         super(LengthRegulator, self).__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def LR(self, x, duration):
         """
@@ -88,9 +89,9 @@ class LengthRegulator(nn.Module):
                     0
                 )
             )
-        phon_expanded_embedding = torch.stack(padded_mel_embedding, dim=0)
+        phon_expanded_embedding = torch.stack(padded_mel_embedding, dim=0).to(self.device)
         # Logic for mel_mask
-        mel_mask = (torch.arange(start=0, end=max_mel_len) >= mel_len.unsqueeze(-1)).int()
+        mel_mask = (torch.arange(start=0, end=max_mel_len) >= mel_len.unsqueeze(-1)).int().to(self.device)
         return phon_expanded_embedding, mel_mask
         
 
@@ -217,6 +218,7 @@ class PitchPredictor(nn.Module):
         f0_min = torch.min(f0, dim=-1, keepdim=True).values
         f0_max = torch.max(f0, dim=-1, keepdim=True).values
         bins = (f0_max - f0_min) / 256
+        bins = bins + 1e-6
 
         quantized_pitch = torch.floor((f0 - f0_min) / bins).clamp(0, 255).to(torch.int32)
         quantized_pitch = quantized_pitch.masked_fill(mask.bool(), 0)
@@ -284,13 +286,14 @@ class EnergyPredictor(nn.Module):
         
         x = x.transpose(1, 2) # --> (batch x filter_size x sequence_length) = (batch x sequence_length x filter_size)
 
-        energy_pred = self.linear_proj(x).squeeze() # --> (batch x sequence_length x filter_size) = (batch x sequence_length x 1)
+        energy_pred = self.linear_proj(x).squeeze(-1) # --> (batch x sequence_length x filter_size) = (batch x sequence_length x 1)
         energy_pred = energy_pred.masked_fill(mask.bool(), 0)
 
         # Energy Quantization
         energy_min = torch.min(energy_pred, dim=-1, keepdim=True).values
         energy_max = torch.max(energy_pred, dim=-1, keepdim=True).values
         bins = (energy_max - energy_min) / 256
+        bins = bins + 1e-6
 
         quantized_energy = torch.floor((energy_pred - energy_min) / bins).clamp(0, 255).to(torch.int32)
         quantized_energy = quantized_energy.masked_fill(mask.bool(), 0)
