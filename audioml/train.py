@@ -1,3 +1,4 @@
+import sys
 import yaml
 import torch
 import numpy as np
@@ -9,6 +10,10 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+print(f"Appended path: {str(Path(__file__).parent.parent)}")
+sys.path.append(str(Path(__file__).parent.parent))
+
+
 from audioml.fastspeech.model import Text2Mel
 from audioml.dataset.feature_dataset import SpeechFeatureDataset
 from audioml.processing.text_speech_alignment import TTSTokenizer
@@ -17,6 +22,26 @@ from audioml.processing.text_speech_alignment import TTSTokenizer
 MODEL_DIR = Path(__file__).parent.parent / "models"
 DATA_DIR = Path(__file__).parent.parent / "data"
 CURR_DIR = Path(__file__).parent
+
+log_file_path = CURR_DIR / "training_log.txt"
+mel_image_dir = CURR_DIR / "mel_images"
+
+# Ensure the log file and mel image directory exist
+log_file_path.touch(exist_ok=True)
+mel_image_dir.mkdir(parents=True, exist_ok=True)
+
+# Add header to log file if it's empty
+if log_file_path.stat().st_size == 0:
+    with open(log_file_path, 'w') as f:
+        header = (
+            "step,total_loss,mel_loss,duration_loss,pitch_spec_loss,pitch_mean_loss,"
+            "pitch_std_loss,energy_loss,"
+            "pred_mel_min,pred_mel_max,pred_mel_mean,"
+            "target_mel_min,target_mel_max,target_mel_mean\n"
+        )
+        f.write(header)
+
+
 
 class ScheduledOptim:
     """ A simple wrapper class for learning rate scheduling """
@@ -174,7 +199,7 @@ def train(
 
                 # Label/Targets
                 log_duration_target = torch.log(torch.clamp(duration, min=1.0)).masked_fill(src_mask.bool(), 0)
-                # Mel-Spectrogram Target
+                # Mel-Spectrogram Target (already log-transformed from preprocessing)
                 mel_spec_target = batch['mel_spectrogram'].to(device)
                 # Pitch Target
                 pitch_spec_target = batch['pitch_spectrogram'].to(device)
@@ -208,7 +233,7 @@ def train(
                 # energy_target.requires_grad = False
 
                 # Loss Calculation
-                # Mel-Spectrogram loss
+                # Mel-Spectrogram loss (higher weight as it's the main output)
                 mel_loss = mae_loss(pred_mel_spec, mel_spec_target)
                 # Pitch-Spectrogram loss
                 pitch_spectrogram_loss = mse_loss(pred_pitch_spec, pitch_spec_target)
@@ -220,10 +245,15 @@ def train(
                 energy_loss = mse_loss(pred_energy, energy_target)
                 # Duration loss
                 duration_loss = mse_loss(pred_log_duration, log_duration_target)
-                # Total Loss
+                
+                # Weighted Total Loss (mel loss should have higher weight)
                 total_loss = (
-                    mel_loss + duration_loss + pitch_spectrogram_loss +
-                    pitch_mean_loss + pitch_std_loss + energy_loss
+                    45.0 * mel_loss +  # Higher weight for mel-spectrogram
+                    1.0 * duration_loss + 
+                    1.0 * pitch_spectrogram_loss +
+                    1.0 * pitch_mean_loss + 
+                    1.0 * pitch_std_loss + 
+                    1.0 * energy_loss
                 )
                 total_loss = total_loss / gradient_accumulation_steps
                 total_loss.backward()
@@ -248,23 +278,31 @@ def train(
                     print(f"Model saved at {model_save_path}")
 
                 if step % train_config['log_step'] == 0:
-                    # Log the losses to Tensorboard
-                    logger.add_scalar('Loss/Total', total_loss.item(), step)
-                    logger.add_scalar('Loss/Mel', mel_loss.item(), step)
-                    logger.add_scalar('Loss/Duration', duration_loss.item(), step)
-                    logger.add_scalar('Loss/PitchSpectrogram', pitch_spectrogram_loss.item(), step)
-                    logger.add_scalar('Loss/PitchMean', pitch_mean_loss.item(), step)
-                    logger.add_scalar('Loss/PitchSTD', pitch_std_loss.item(), step)
-                    logger.add_scalar('Loss/Energy', energy_loss.item(), step)
-                    print(f""
-                          f"Step: {step}, "
-                          f"Total Loss: {total_loss.item():.4f}, "
-                          f"Mel Loss: {mel_loss.item():.4f}, "
-                          f"Duration Loss: {duration_loss.item():.4f}, "
-                          f"Pitch Spectrogram Loss: {pitch_spectrogram_loss.item():.4f}, "
-                          f"Pitch Mean Loss: {pitch_mean_loss.item():.4f}, "
-                          f"Pitch STD Loss: {pitch_std_loss.item():.4f}, "
-                          f"Energy Loss: {energy_loss.item():.4f}")
+
+                    loss_items = {
+                        "Total": total_loss.item(), "Mel": mel_loss.item(), "Duration": duration_loss.item(),
+                        "PitchSpec": pitch_spectrogram_loss.item(), "PitchMean": pitch_mean_loss.item(),
+                        "PitchSTD": pitch_std_loss.item(), "Energy": energy_loss.item()
+                    }
+                    log_msg = f"Step: {step}, " + ", ".join([f"{k} Loss: {v:.4f}" for k, v in loss_items.items()])
+                    print(log_msg)
+                    
+                    # Add debugging information for model outputs
+                    pred_mel_min = pred_mel_spec.min().item()
+                    pred_mel_max = pred_mel_spec.max().item()
+                    pred_mel_mean = pred_mel_spec.mean().item()
+                    target_mel_min = mel_spec_target.min().item()
+                    target_mel_max = mel_spec_target.max().item()
+                    target_mel_mean = mel_spec_target.mean().item()
+                    
+                    print(f"Predicted mel-spec range: [{pred_mel_min:.4f}, {pred_mel_max:.4f}]")
+                    print(f"Target mel-spec range: [{target_mel_min:.4f}, {target_mel_max:.4f}]")
+                    print(f"Predicted mel-spec mean: {pred_mel_mean:.4f}")
+                    print(f"Target mel-spec mean: {target_mel_mean:.4f}")
+                    
+                    # Log to Tensorboard
+                    for k, v in loss_items.items():
+                        logger.add_scalar(f'Loss/{k}', v, step)
 
                     # Log Images <<---- Adding Mel-Spectrogram to tensorboard
                     # For Visualization, we'll just pick the first item from the batch
@@ -292,6 +330,32 @@ def train(
                       global_step=step,
                       dataformats="NHWC"
                     )
+
+                    # Enhanced: Log to text file with mel-spectrogram debugging info
+                    with open(log_file_path, 'a') as f:
+                        log_line = (
+                            f"{step},{loss_items['Total']:.4f},{loss_items['Mel']:.4f},"
+                            f"{loss_items['Duration']:.4f},{loss_items['PitchSpec']:.4f},"
+                            f"{loss_items['PitchMean']:.4f},{loss_items['PitchSTD']:.4f},"
+                            f"{loss_items['Energy']:.4f},"
+                            f"{pred_mel_min:.4f},{pred_mel_max:.4f},{pred_mel_mean:.4f},"
+                            f"{target_mel_min:.4f},{target_mel_max:.4f},{target_mel_mean:.4f}\n"
+                        )
+                        f.write(log_line)
+
+                    # New: Save mel-spectrogram images
+                    predicted_spec_np = pred_mel_spec[0].detach().cpu().numpy()
+                    target_spec_np = mel_spec_target[0].detach().cpu().numpy()
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+                    fig.suptitle(f'Mel-Spectrograms at Step {step}')
+                    im1 = ax1.imshow(predicted_spec_np, aspect='auto', origin='lower', cmap='viridis')
+                    ax1.set_title("Predicted"); ax1.set_ylabel("Mel Bins"); fig.colorbar(im1, ax=ax1)
+                    im2 = ax2.imshow(target_spec_np, aspect='auto', origin='lower', cmap='viridis')
+                    ax2.set_title("Target"); ax2.set_xlabel("Frames"); ax2.set_ylabel("Mel Bins"); fig.colorbar(im2, ax=ax2)
+                    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+                    image_save_path = mel_image_dir / f"mel_step_{step}.png"
+                    plt.savefig(image_save_path)
+                    plt.close(fig)
                 
                 # Update progress bar
                 outer_loop.update(1)

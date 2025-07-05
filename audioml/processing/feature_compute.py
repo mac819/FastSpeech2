@@ -122,6 +122,18 @@ def calc_mel_spectrogram(filepath, config):
     )
     
     melspec = mel_spectrogram(audio_arr)
+    
+    # Better normalization approach
+    # 1. Add small epsilon to avoid log(0)
+    epsilon = 1e-9
+    melspec = melspec + epsilon
+    
+    # 2. Apply log transformation to compress dynamic range
+    melspec = torch.log(melspec)
+    
+    # 3. Normalize to reasonable range (optional)
+    # melspec = (melspec - melspec.mean()) / (melspec.std() + 1e-8)
+    
     return melspec# , audio_arr, sample_rate
 
 

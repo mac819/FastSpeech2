@@ -161,6 +161,10 @@ class MelDecoder(nn.Module):
 
         self.mel_proj = nn.Linear(self.d_out, self.n_mels)
         
+        # Remove ReLU activation since we need negative values for log space
+        # The model should learn to output log-transformed mel-spectrograms
+        self.output_scale = 1.0  # Can be tuned if needed
+        
 
     def forward(self, x, mask): # --> (batch x seq_len x d_in)
         batch, seq_len, emb_dim = x.shape
@@ -171,6 +175,8 @@ class MelDecoder(nn.Module):
             x = fft(x, mask)
 
         mel_spec = self.mel_proj(x)
+        # No activation - output should be in log space to match preprocessing
+        mel_spec = mel_spec * self.output_scale
         mel_spec = mel_spec.masked_fill(mask.unsqueeze(-1).bool(), 0)
         return mel_spec
     

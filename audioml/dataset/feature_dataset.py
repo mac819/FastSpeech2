@@ -196,11 +196,17 @@ class SpeechFeatureDataset(Dataset):
         feature_arr = [np.load(x) for x in features]
         feature_tensors = [torch.from_numpy(arr).float() for arr in feature_arr]
 
+        # Validate mel-spectrogram values
+        mel_spec = torch.transpose(feature_tensors[0][0], 0, 1)
+        if torch.isnan(mel_spec).any() or torch.isinf(mel_spec).any():
+            print(f"Warning: Invalid values in mel-spectrogram for {feature_fname}")
+            mel_spec = torch.clamp(mel_spec, min=0.0, max=10.0)  # Clamp to reasonable range
+
         return {
             'filename': feature_fname,
             'raw_text': text,
             'token_ids': text_token_ids,
-            'mel_spectrogram': torch.transpose(feature_tensors[0][0], 0, 1), # (time_frame, mel-bins)
+            'mel_spectrogram': mel_spec, # (time_frame, mel-bins)
             'energy': feature_tensors[1],
             'duration': feature_tensors[2],
             'pitch_contour': feature_tensors[3],
