@@ -248,7 +248,7 @@ def train(
                 
                 # Weighted Total Loss (mel loss should have higher weight)
                 total_loss = (
-                    45.0 * mel_loss +  # Higher weight for mel-spectrogram
+                    15.0 * mel_loss +  # Reduced from 45.0 to 15.0
                     1.0 * duration_loss + 
                     1.0 * pitch_spectrogram_loss +
                     1.0 * pitch_mean_loss + 

@@ -66,13 +66,13 @@ train:
   optimizer:
     betas: [0.9, 0.98]
     eps: 1e-8
-    learning_rate: 0.0001
+    learning_rate: 0.0002
     anneal_steps: [200000, 400000, 600000]
     anneal_rate: 0.5
-    warm_up_steps: 8000
+    warm_up_steps: 4000
     weight_decay: 0.001
   gradient_accumulation_steps: 4
-  gradient_clip_threshold: 1.0
+  gradient_clip_threshold: 0.5
   log_step: 100
   save_step: 1000
   shuffle: True
