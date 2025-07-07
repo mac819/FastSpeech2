@@ -65,12 +65,12 @@ train:
   restore_step: 0
   optimizer:
     betas: [0.9, 0.98]
-    eps: 1e-9
+    eps: 1e-8
     learning_rate: 0.0001
-    anneal_steps: [300000, 400000, 500000]
-    anneal_rate: 0.3
-    warm_up_steps: 4000
-    weight_decay: 0.01
+    anneal_steps: [200000, 400000, 600000]
+    anneal_rate: 0.5
+    warm_up_steps: 8000
+    weight_decay: 0.001
   gradient_accumulation_steps: 4
   gradient_clip_threshold: 1.0
   log_step: 100
